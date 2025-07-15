@@ -127,7 +127,9 @@ async function listen(eventMgr: EventManager, spokePool: Contract, eventNames: s
 
           const events = eventMgr.tick();
           const { blockNumber } = events.at(-1);
-          postEvents(blockNumber, getCurrentTime(), events);
+          if (!postEvents(blockNumber, getCurrentTime(), events)) {
+            stop = true;
+          }
         },
       });
     });
@@ -248,6 +250,6 @@ if (require.main === module) {
     .finally(async () => {
       await disconnectRedisClients();
       logger.debug({ at: "RelayerSpokePoolListener", message: `Exiting ${chain} listener.` });
-      exit(process.exitCode);
+      exit(Number(process.exitCode));
     });
 }

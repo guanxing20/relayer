@@ -1,6 +1,15 @@
 import winston from "winston";
 import { CommonConfig, ProcessEnv } from "../common";
-import { CHAIN_IDs, ethers, getNativeTokenAddressForChain, isDefined, TOKEN_SYMBOLS_MAP } from "../utils";
+import {
+  CHAIN_IDs,
+  ethers,
+  getNativeTokenAddressForChain,
+  isDefined,
+  TOKEN_SYMBOLS_MAP,
+  Address,
+  toAddressType,
+  EvmAddress,
+} from "../utils";
 
 // Set modes to true that you want to enable in the AcrossMonitor bot.
 export interface BotModes {
@@ -11,6 +20,7 @@ export interface BotModes {
   utilizationEnabled: boolean; // Monitors pool utilization ratio
   unknownRootBundleCallersEnabled: boolean; // Monitors relay related events triggered by non-whitelisted addresses
   spokePoolBalanceReportEnabled: boolean;
+  binanceWithdrawalLimitsEnabled: boolean;
 }
 
 export class MonitorConfig extends CommonConfig {
@@ -20,19 +30,19 @@ export class MonitorConfig extends CommonConfig {
   readonly hubPoolStartingBlock: number | undefined;
   readonly hubPoolEndingBlock: number | undefined;
   readonly stuckRebalancesEnabled: boolean;
-  readonly monitoredRelayers: string[];
+  readonly monitoredRelayers: Address[];
   readonly monitoredSpokePoolChains: number[];
   readonly monitoredTokenSymbols: string[];
-  readonly whitelistedDataworkers: string[];
-  readonly whitelistedRelayers: string[];
-  readonly knownV1Addresses: string[];
+  readonly whitelistedDataworkers: Address[];
+  readonly whitelistedRelayers: Address[];
+  readonly knownV1Addresses: Address[];
   readonly bundlesCount: number;
   readonly botModes: BotModes;
   readonly refillEnabledBalances: {
     chainId: number;
     isHubPool: boolean;
-    account: string;
-    token: string;
+    account: Address;
+    token: Address;
     target: number;
     trigger: number;
   }[] = [];
@@ -40,14 +50,12 @@ export class MonitorConfig extends CommonConfig {
     chainId: number;
     warnThreshold: number | null;
     errorThreshold: number | null;
-    account: string;
-    token: string;
+    account: Address;
+    token: Address;
   }[] = [];
   readonly additionalL1NonLpTokens: string[] = [];
-
-  // TODO: Remove this config once we fully migrate to generic adapters.
-  readonly useGenericAdapter: boolean;
-
+  readonly binanceWithdrawWarnThreshold: number;
+  readonly binanceWithdrawAlertThreshold: number;
   constructor(env: ProcessEnv) {
     super(env);
 
@@ -72,6 +80,8 @@ export class MonitorConfig extends CommonConfig {
       MONITORED_TOKEN_SYMBOLS,
       MONITOR_REPORT_NON_LP_TOKENS,
       BUNDLES_COUNT,
+      BINANCE_WITHDRAW_WARN_THRESHOLD,
+      BINANCE_WITHDRAW_ALERT_THRESHOLD,
     } = env;
 
     this.botModes = {
@@ -82,6 +92,8 @@ export class MonitorConfig extends CommonConfig {
       unknownRootBundleCallersEnabled: UNKNOWN_ROOT_BUNDLE_CALLERS_ENABLED === "true",
       stuckRebalancesEnabled: STUCK_REBALANCES_ENABLED === "true",
       spokePoolBalanceReportEnabled: REPORT_SPOKE_POOL_BALANCES === "true",
+      binanceWithdrawalLimitsEnabled:
+        isDefined(BINANCE_WITHDRAW_WARN_THRESHOLD) || isDefined(BINANCE_WITHDRAW_ALERT_THRESHOLD),
     };
 
     // Used to monitor activities not from whitelisted data workers or relayers.
@@ -99,7 +111,8 @@ export class MonitorConfig extends CommonConfig {
         return TOKEN_SYMBOLS_MAP[token]?.addresses?.[CHAIN_IDs.MAINNET];
       }
     });
-
+    this.binanceWithdrawWarnThreshold = Number(BINANCE_WITHDRAW_WARN_THRESHOLD ?? 1);
+    this.binanceWithdrawAlertThreshold = Number(BINANCE_WITHDRAW_ALERT_THRESHOLD ?? 1);
     // Used to send tokens if available in wallet to balances under target balances.
     if (REFILL_BALANCES) {
       this.refillEnabledBalances = JSON.parse(REFILL_BALANCES).map(
@@ -116,7 +129,7 @@ export class MonitorConfig extends CommonConfig {
           return {
             // Required fields:
             chainId,
-            account,
+            account: toAddressType(account, chainId),
             target,
             trigger,
             // Optional fields that will set to defaults:
@@ -172,10 +185,10 @@ export class MonitorConfig extends CommonConfig {
 
           const isNativeToken = !token || token === getNativeTokenAddressForChain(chainId);
           return {
-            token: isNativeToken ? getNativeTokenAddressForChain(chainId) : token,
+            token: isNativeToken ? getNativeTokenAddressForChain(chainId) : EvmAddress.from(token),
             errorThreshold: parsedErrorThreshold,
             warnThreshold: parsedWarnThreshold,
-            account: ethers.utils.getAddress(account),
+            account: EvmAddress.from(ethers.utils.getAddress(account)),
             chainId: parseInt(chainId),
           };
         }
@@ -196,7 +209,7 @@ export class MonitorConfig extends CommonConfig {
   }
 }
 
-const parseAddressesOptional = (addressJson?: string): string[] => {
+const parseAddressesOptional = (addressJson?: string): Address[] => {
   const rawAddresses: string[] = addressJson ? JSON.parse(addressJson) : [];
-  return rawAddresses.map((address) => ethers.utils.getAddress(address));
+  return rawAddresses.map((address) => toAddressType(ethers.utils.getAddress(address), CHAIN_IDs.MAINNET));
 };

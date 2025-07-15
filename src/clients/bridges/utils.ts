@@ -80,6 +80,43 @@ export async function setTokenAllowanceInCache(
   await redis?.set(key, allowance.toString());
 }
 
+// Note: All of these are set as `EvmAddress` types since their `toString()` implementation outputs a 20 byte address.
+function getL2AllowanceCacheKey(
+  l2ChainId: number,
+  l2Token: EvmAddress,
+  userAddress: EvmAddress,
+  contractAddress: EvmAddress
+): string {
+  return `l2BridgeTokenAllowance_${l2ChainId}_${l2Token}_${userAddress}_targetContract:${contractAddress}`;
+}
+
+export async function getL2TokenAllowanceFromCache(
+  l2ChainId: number,
+  l2Token: EvmAddress,
+  userAddress: EvmAddress,
+  contractAddress: EvmAddress
+): Promise<BigNumber | undefined> {
+  const redis = await getRedisCache();
+  const key = getL2AllowanceCacheKey(l2ChainId, l2Token, userAddress, contractAddress);
+  const allowance = await redis?.get<string>(key);
+  if (allowance === null) {
+    return undefined;
+  }
+  return toBN(allowance);
+}
+
+export async function setL2TokenAllowanceInCache(
+  l2ChainId: number,
+  l2Token: EvmAddress,
+  userAddress: EvmAddress,
+  contractAddress: EvmAddress,
+  allowance: BigNumber
+): Promise<void> {
+  const redis = await getRedisCache();
+  const key = getL2AllowanceCacheKey(l2ChainId, l2Token, userAddress, contractAddress);
+  await redis?.set(key, allowance.toString());
+}
+
 export async function approveTokens(
   tokens: { token: Contract; bridge: EvmAddress }[],
   chainId: number,
@@ -89,14 +126,14 @@ export async function approveTokens(
   const approvalMarkdwn = await mapAsync(tokens, async ({ token: l1Token, bridge }) => {
     const txs = [];
     if (TOKEN_APPROVALS_TO_FIRST_ZERO[hubChainId]?.includes(l1Token.address)) {
-      txs.push(await runTransaction(logger, l1Token, "approve", [bridge.toAddress(), bnZero]));
+      txs.push(await runTransaction(logger, l1Token, "approve", [bridge.toNative(), bnZero]));
     }
-    txs.push(await runTransaction(logger, l1Token, "approve", [bridge.toAddress(), MAX_SAFE_ALLOWANCE]));
+    txs.push(await runTransaction(logger, l1Token, "approve", [bridge.toNative(), MAX_SAFE_ALLOWANCE]));
     const receipts = await Promise.all(txs.map((tx) => tx.wait()));
     const hubNetwork = getNetworkName(hubChainId);
     const spokeNetwork = getNetworkName(chainId);
     let internalMrkdwn =
-      ` - Approved canonical ${spokeNetwork} token bridge ${blockExplorerLink(bridge.toAddress(), hubChainId)} ` +
+      ` - Approved canonical ${spokeNetwork} token bridge ${blockExplorerLink(bridge.toNative(), hubChainId)} ` +
       `to spend ${await l1Token.symbol()} ${blockExplorerLink(l1Token.address, hubChainId)} on ${hubNetwork}.` +
       `tx: ${blockExplorerLink(receipts[receipts.length - 1].txnRef, hubChainId)}`;
     if (receipts.length > 1) {

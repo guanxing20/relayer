@@ -22,13 +22,15 @@ import {
   buildSlowRelayTree,
   fixedPointAdjustment,
   getRefundsFromBundle,
-  getTimestampsForBundleEndBlocks,
+  getTimestampsForBundleStartBlocks,
   isDefined,
   MerkleTree,
   Profiler,
   winston,
   getNativeTokenSymbol,
   getWrappedNativeTokenAddress,
+  Address,
+  toAddressType,
 } from "../utils";
 import { DataworkerClients } from "./DataworkerClientHelper";
 import {
@@ -53,15 +55,30 @@ export async function blockRangesAreInvalidForSpokeClients(
   isV3 = false
 ): Promise<InvalidBlockRange[]> {
   assert(blockRanges.length === chainIdListForBundleEvaluationBlockNumbers.length);
-  let endBlockTimestamps: { [chainId: number]: number } | undefined;
+  let earliestStartBlockTimestamp: { timestamp: number; chainId: number } | undefined = undefined;
   if (isV3) {
-    endBlockTimestamps = await getTimestampsForBundleEndBlocks(
+    const startBlockTimestamps = await getTimestampsForBundleStartBlocks(
       spokePoolClients,
       blockRanges,
       chainIdListForBundleEvaluationBlockNumbers
     );
     // There should be a spoke pool client instantiated for every bundle timestamp.
-    assert(!Object.keys(endBlockTimestamps).some((chainId) => !isDefined(spokePoolClients[chainId])));
+    assert(!Object.keys(startBlockTimestamps).some((chainId) => !isDefined(spokePoolClients[chainId])));
+    earliestStartBlockTimestamp = Object.entries(startBlockTimestamps).reduce(
+      (currMax, [chainId, timestamp]) => {
+        if (timestamp < currMax.timestamp) {
+          currMax = {
+            chainId: Number(chainId),
+            timestamp,
+          };
+        }
+        return currMax;
+      },
+      {
+        timestamp: Object.values(startBlockTimestamps)[0],
+        chainId: Number(Object.keys(startBlockTimestamps)[0]),
+      }
+    );
   }
 
   // Return an undefined object if the block ranges are valid
@@ -114,7 +131,7 @@ export async function blockRangesAreInvalidForSpokeClients(
         };
       }
 
-      if (endBlockTimestamps !== undefined) {
+      if (earliestStartBlockTimestamp !== undefined) {
         const maxFillDeadlineBufferInBlockRange = await spokePoolClient.getMaxFillDeadlineInRange(
           bundleRangeFromBlock,
           end
@@ -131,13 +148,14 @@ export async function blockRangesAreInvalidForSpokeClients(
           // maximum time it takes for a newly expired deposit to be included in a bundle. A conservative value for
           // this bundle time is 3 hours. This `conservativeBundleFrequencySeconds` buffer also ensures that all deposits
           // that are technically "expired", but have fills in the bundle, are also included. This can happen if a fill
-          // is sent pretty late into the deposit's expiry period.
+          // is sent pretty late into the deposit's expiry period. We make sure that the earliest timestamp across
+          // all chains in this bundle is at least more than this maximum lookback window into the past.
           const oldestTime = await spokePoolClient.getTimeAt(spokePoolClient.eventSearchConfig.from);
-          const expiryWindow = endBlockTimestamps[chainId] - oldestTime;
+          const expiryWindow = earliestStartBlockTimestamp.timestamp - oldestTime;
           const safeExpiryWindow = maxFillDeadlineBufferInBlockRange + conservativeBundleFrequencySeconds;
           if (expiryWindow < safeExpiryWindow) {
             return {
-              reason: `cannot evaluate all possible expired deposits; endBlockTimestamp ${endBlockTimestamps[chainId]} - spokePoolClient.eventSearchConfig.from timestamp ${oldestTime} < maxFillDeadlineBufferInBlockRange ${maxFillDeadlineBufferInBlockRange} + conservativeBundleFrequencySeconds ${conservativeBundleFrequencySeconds}`,
+              reason: `cannot evaluate all possible expired deposits; earliestStartBlockTimestamp ${earliestStartBlockTimestamp.timestamp} (set by chain ${earliestStartBlockTimestamp.chainId}) - spokePoolClient.eventSearchConfig.from timestamp ${oldestTime} < maxFillDeadlineBufferInBlockRange ${maxFillDeadlineBufferInBlockRange} + conservativeBundleFrequencySeconds ${conservativeBundleFrequencySeconds}`,
               chainId,
             };
           }
@@ -239,22 +257,34 @@ export function _buildRelayerRefundRoot(
     Object.entries(refundsForChain).forEach(([l2TokenAddress, refunds]) => {
       // If the token cannot be mapped to any PoolRebalanceRoute, then the amount to return must be 0 since there
       // is no way to send the token back to the HubPool.
-      if (!clients.hubPoolClient.l2TokenHasPoolRebalanceRoute(l2TokenAddress, repaymentChainId, endBlockForMainnet)) {
+      if (
+        !clients.hubPoolClient.l2TokenHasPoolRebalanceRoute(
+          toAddressType(l2TokenAddress, repaymentChainId),
+          repaymentChainId,
+          endBlockForMainnet
+        )
+      ) {
         relayerRefundLeaves.push(
-          ..._getRefundLeaves(refunds, bnZero, repaymentChainId, l2TokenAddress, maxRefundCount)
+          ..._getRefundLeaves(
+            refunds,
+            bnZero,
+            repaymentChainId,
+            toAddressType(l2TokenAddress, repaymentChainId),
+            maxRefundCount
+          )
         );
         return;
       }
       // If the token can be mapped to a PoolRebalanceRoute, then we need to calculate the amount to return based
       // on its running balances.
       const l1TokenCounterpart = clients.hubPoolClient.getL1TokenForL2TokenAtBlock(
-        l2TokenAddress,
+        toAddressType(l2TokenAddress, repaymentChainId),
         repaymentChainId,
         endBlockForMainnet
       );
 
       const spokePoolTargetBalance = clients.configStoreClient.getSpokeTargetBalancesForBlock(
-        l1TokenCounterpart,
+        l1TokenCounterpart.toEvmAddress(),
         repaymentChainId,
         endBlockForMainnet
       );
@@ -262,11 +292,17 @@ export function _buildRelayerRefundRoot(
       // The `amountToReturn` for a { repaymentChainId, L2TokenAddress} should be set to max(-netSendAmount, 0).
       const amountToReturn = getAmountToReturnForRelayerRefundLeaf(
         spokePoolTargetBalance,
-        runningBalances[repaymentChainId][l1TokenCounterpart]
+        runningBalances[repaymentChainId][l1TokenCounterpart.toEvmAddress()]
       );
 
       relayerRefundLeaves.push(
-        ..._getRefundLeaves(refunds, amountToReturn, repaymentChainId, l2TokenAddress, maxRefundCount)
+        ..._getRefundLeaves(
+          refunds,
+          amountToReturn,
+          repaymentChainId,
+          toAddressType(l2TokenAddress, repaymentChainId),
+          maxRefundCount
+        )
       );
     });
   });
@@ -287,21 +323,21 @@ export function _buildRelayerRefundRoot(
       // If we've already seen this leaf, then skip.
       const existingLeaf = relayerRefundLeaves.find(
         (relayerRefundLeaf) =>
-          relayerRefundLeaf.chainId === leaf.chainId && relayerRefundLeaf.l2TokenAddress === l2TokenCounterpart
+          relayerRefundLeaf.chainId === leaf.chainId && relayerRefundLeaf.l2TokenAddress.eq(l2TokenCounterpart)
       );
       if (existingLeaf !== undefined) {
         return;
       }
 
       const spokePoolTargetBalance = clients.configStoreClient.getSpokeTargetBalancesForBlock(
-        leaf.l1Tokens[index],
+        leaf.l1Tokens[index].toEvmAddress(),
         leaf.chainId,
         endBlockForMainnet
       );
 
       const amountToReturn = getAmountToReturnForRelayerRefundLeaf(
         spokePoolTargetBalance,
-        runningBalances[leaf.chainId][leaf.l1Tokens[index]]
+        runningBalances[leaf.chainId][leaf.l1Tokens[index].toEvmAddress()]
       );
 
       relayerRefundLeaves.push({
@@ -328,13 +364,13 @@ export function _getRefundLeaves(
   refunds: Refund,
   amountToReturn: BigNumber,
   repaymentChainId: number,
-  l2TokenAddress: string,
+  l2TokenAddress: Address,
   maxRefundCount: number
 ): RelayerRefundLeafWithGroup[] {
   const nonZeroRefunds = Object.fromEntries(Object.entries(refunds).filter(([, refundAmount]) => refundAmount.gt(0)));
   // We need to sort leaves deterministically so that the same root is always produced from the same loadData
   // return value, so sort refund addresses by refund amount (descending) and then address (ascending).
-  const sortedRefundAddresses = sortRefundAddresses(nonZeroRefunds);
+  const sortedRefundAddresses = sortRefundAddresses(nonZeroRefunds, repaymentChainId);
 
   const relayerRefundLeaves: RelayerRefundLeafWithGroup[] = [];
 
@@ -346,7 +382,7 @@ export function _getRefundLeaves(
       // L2 token address
       amountToReturn: i === 0 ? amountToReturn : bnZero,
       chainId: repaymentChainId,
-      refundAmounts: sortedRefundAddresses.slice(i, i + maxRefundCount).map((address) => refunds[address]),
+      refundAmounts: sortedRefundAddresses.slice(i, i + maxRefundCount).map((address) => refunds[address.toBytes32()]),
       leafId: 0, // Will be updated before inserting into tree when we sort all leaves.
       l2TokenAddress,
       refundAddresses: sortedRefundAddresses.slice(i, i + maxRefundCount),
@@ -366,10 +402,13 @@ export function _getRefundLeaves(
  * @param chainId chain to check for WETH and ETH addresses
  * @returns WETH and ETH addresses.
  */
-function getNativeTokens(chainId: number): string[] {
+function getNativeTokens(chainId: number): Address[] {
   const nativeTokenSymbol = getNativeTokenSymbol(chainId);
   // Can't use TOKEN_SYMBOLS_MAP for ETH because it duplicates the WETH addresses, which is not correct for this use case.
-  const nativeTokens = [getWrappedNativeTokenAddress(chainId), CONTRACT_ADDRESSES[chainId].nativeToken.address];
+  const nativeTokens = [
+    getWrappedNativeTokenAddress(chainId),
+    toAddressType(CONTRACT_ADDRESSES[chainId].nativeToken.address, chainId),
+  ];
   if (nativeTokens.some((tokenAddress) => !isDefined(tokenAddress))) {
     throw new Error(`${nativeTokenSymbol} address not defined for chain ${chainId}`);
   }
@@ -385,15 +424,15 @@ function getNativeTokens(chainId: number): string[] {
  * `l2TokenAddress` on `l2ChainId`.
  */
 export function l2TokensToCountTowardsSpokePoolLeafExecutionCapital(
-  l2TokenAddress: string,
+  l2TokenAddress: Address,
   l2ChainId: number
-): string[] {
+): Address[] {
   if (!spokesThatHoldNativeTokens.includes(l2ChainId)) {
     return [l2TokenAddress];
   }
   // If we get to here, ETH and WETH addresses should be defined, or we'll throw an error.
   const nativeTokens = getNativeTokens(l2ChainId);
-  return nativeTokens.includes(l2TokenAddress) ? nativeTokens : [l2TokenAddress];
+  return nativeTokens.some((token) => token.eq(l2TokenAddress)) ? nativeTokens : [l2TokenAddress];
 }
 
 /**

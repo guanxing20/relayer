@@ -16,6 +16,8 @@ import {
   groupObjectCountsByProp,
   isEVMSpokePoolClient,
   assert,
+  EvmAddress,
+  Address,
 } from "../../utils";
 import { HubPoolClient, SpokePoolClient } from "../../clients";
 import { FinalizerPromise } from "../types";
@@ -67,6 +69,9 @@ type BinanceInteraction = {
   status?: number;
 };
 
+// The precision of a `DECIMAL` type in the Binance API.
+const DECIMAL_PRECISION = 1_000_000;
+
 // ParsedAccountCoins represents a simplified return type of the Binance `accountCoins` endpoint.
 type ParsedAccountCoins = Coin[];
 
@@ -81,9 +86,10 @@ export async function binanceFinalizer(
   _hubPoolClient: HubPoolClient,
   l2SpokePoolClient: SpokePoolClient,
   l1SpokePoolClient: SpokePoolClient,
-  senderAddresses: string[]
+  _senderAddresses: Address[]
 ): Promise<FinalizerPromise> {
   assert(isEVMSpokePoolClient(l1SpokePoolClient) && isEVMSpokePoolClient(l2SpokePoolClient));
+  const senderAddresses = _senderAddresses.map((address) => address.toEvmAddress());
   const chainId = l2SpokePoolClient.chainId;
   const hubChainId = l1SpokePoolClient.chainId;
   const l1EventSearchConfig = l1SpokePoolClient.eventSearchConfig;
@@ -141,7 +147,7 @@ export async function binanceFinalizer(
 
       const coin = accountCoins.find((coin) => coin.symbol === symbol);
       const l1Token = TOKEN_SYMBOLS_MAP[symbol].addresses[hubChainId];
-      const { decimals: l1Decimals } = getTokenInfo(l1Token, hubChainId);
+      const { decimals: l1Decimals } = getTokenInfo(EvmAddress.from(l1Token), hubChainId);
       const withdrawals = await getBinanceWithdrawals(binanceApi, symbol, fromTimestamp);
 
       // Start by finalizing L1 -> L2, then go to L2 -> L1.
@@ -196,6 +202,8 @@ export async function binanceFinalizer(
           amountToFinalize = Number(coin.balance);
         }
         if (amountToFinalize >= Number(networkLimits.withdrawMin)) {
+          // Lastly, we need to truncate the amount to withdraw to six decimal places.
+          amountToFinalize = Math.floor(amountToFinalize * DECIMAL_PRECISION) / DECIMAL_PRECISION;
           const withdrawalId = await binanceApi.withdraw({
             coin: symbol,
             address,

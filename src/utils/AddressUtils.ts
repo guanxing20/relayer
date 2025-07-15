@@ -1,19 +1,14 @@
 import { TOKEN_SYMBOLS_MAP } from "@across-protocol/constants";
-import { BigNumber, compareAddressesSimple, ethers, getRemoteTokenForL1Token, isDefined } from ".";
-
-export function compareAddresses(addressA: string, addressB: string): 1 | -1 | 0 {
-  // Convert address strings to BigNumbers and then sort numerical value of the BigNumber, which sorts the addresses
-  // effectively by their hex value.
-  const bnAddressA = BigNumber.from(addressA);
-  const bnAddressB = BigNumber.from(addressB);
-  if (bnAddressA.gt(bnAddressB)) {
-    return 1;
-  } else if (bnAddressA.lt(bnAddressB)) {
-    return -1;
-  } else {
-    return 0;
-  }
-}
+import {
+  compareAddressesSimple,
+  ethers,
+  getRemoteTokenForL1Token,
+  isDefined,
+  Address,
+  EvmAddress,
+  toAddressType,
+} from ".";
+import { AccountRole, type Address as KitAddress, type WritableAccount, type ReadonlyAccount } from "@solana/kit";
 
 export function includesAddressSimple(address: string | undefined, list: string[]): boolean {
   if (!isDefined(address)) {
@@ -59,27 +54,38 @@ export function resolveTokenDecimals(tokenSymbol: string): number {
  * @returns L2 token address
  */
 export function getTranslatedTokenAddress(
-  l1Token: string,
+  l1Token: EvmAddress,
   hubChainId: number,
   l2ChainId: number,
   isNativeUsdc = false
-): string {
+): Address {
   // Base Case
   if (hubChainId === l2ChainId) {
     return l1Token;
   }
   // Native USDC or not USDC, we can just look up in the token map directly.
-  if (isNativeUsdc || !compareAddressesSimple(l1Token, TOKEN_SYMBOLS_MAP.USDC.addresses[hubChainId])) {
-    return getRemoteTokenForL1Token(l1Token, l2ChainId, { chainId: hubChainId });
+  if (isNativeUsdc || !compareAddressesSimple(l1Token.toEvmAddress(), TOKEN_SYMBOLS_MAP.USDC.addresses[hubChainId])) {
+    return getRemoteTokenForL1Token(l1Token, l2ChainId, hubChainId);
   }
   // Handle USDC special case where there could be multiple versions of USDC on an L2: Bridged or Native
   const bridgedUsdcMapping = Object.values(TOKEN_SYMBOLS_MAP).find(
     ({ symbol, addresses }) =>
-      symbol !== "USDC" && compareAddressesSimple(addresses[hubChainId], l1Token) && addresses[l2ChainId]
+      symbol !== "USDC" && compareAddressesSimple(addresses[hubChainId], l1Token.toEvmAddress()) && addresses[l2ChainId]
   );
-  return bridgedUsdcMapping?.addresses[l2ChainId];
+  return toAddressType(bridgedUsdcMapping?.addresses[l2ChainId], l2ChainId);
 }
 
 export function checkAddressChecksum(tokenAddress: string): boolean {
   return ethers.utils.getAddress(tokenAddress) === tokenAddress;
+}
+
+export function toBuffer(address: Address): Buffer {
+  return Buffer.from(address.rawAddress);
+}
+
+export function getAccountMeta(value: KitAddress, isWritable: boolean): WritableAccount | ReadonlyAccount {
+  return Object.freeze({
+    address: value,
+    role: isWritable ? AccountRole.WRITABLE : AccountRole.READONLY,
+  });
 }

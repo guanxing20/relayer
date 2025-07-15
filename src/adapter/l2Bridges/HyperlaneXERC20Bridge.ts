@@ -28,7 +28,6 @@ import {
   HYPERLANE_FEE_CAP_OVERRIDES,
 } from "../../common";
 import { AugmentedTransaction } from "../../clients/TransactionClient";
-import ERC20_ABI from "../../common/abi/MinimalERC20.json";
 
 export class HyperlaneXERC20BridgeL2 extends BaseL2BridgeAdapter {
   readonly l2Token: EvmAddress;
@@ -45,19 +44,20 @@ export class HyperlaneXERC20BridgeL2 extends BaseL2BridgeAdapter {
   ) {
     super(l2chainId, hubChainId, l2Signer, l1Provider, l1Token);
 
-    const l2TokenAddressStr = getTranslatedTokenAddress(l1Token.toAddress(), hubChainId, l2chainId);
-    this.l2Token = EvmAddress.from(l2TokenAddressStr);
+    const l2Token = getTranslatedTokenAddress(l1Token, hubChainId, l2chainId);
+    assert(l2Token.isEVM());
+    this.l2Token = l2Token;
 
-    const l2RouterAddressStr = HYPERLANE_ROUTERS[l2chainId]?.[l2TokenAddressStr];
+    const l2RouterAddressStr = HYPERLANE_ROUTERS[l2chainId]?.[l2Token.toNative()];
     assert(
       isDefined(l2RouterAddressStr),
-      `No L2 Hyperlane router found for token ${l2TokenAddressStr} on chain ${l2chainId}`
+      `No L2 Hyperlane router found for token ${l2Token.toNative()} on chain ${l2chainId}`
     );
 
-    const l1RouterAddressStr = HYPERLANE_ROUTERS[hubChainId]?.[l1Token.toAddress()];
+    const l1RouterAddressStr = HYPERLANE_ROUTERS[hubChainId]?.[l1Token.toNative()];
     assert(
       isDefined(l1RouterAddressStr),
-      `No L1 Hyperlane router found for token ${l1Token.toAddress()} on chain ${hubChainId}`
+      `No L1 Hyperlane router found for token ${l1Token.toNative()} on chain ${hubChainId}`
     );
 
     this.l2Bridge = new Contract(l2RouterAddressStr, HYPERLANE_ROUTER_ABI, l2Signer);
@@ -88,22 +88,8 @@ export class HyperlaneXERC20BridgeL2 extends BaseL2BridgeAdapter {
       `this.l2Token does not match l2Token constructWithdrawToL1Txns was called with: ${this.l2Token} != ${l2Token}`
     );
 
-    const { decimals, symbol } = getTokenInfo(l2Token.toAddress(), this.l2chainId);
+    const { decimals, symbol } = getTokenInfo(l2Token, this.l2chainId);
     const formatter = createFormatFunction(2, 4, false, decimals);
-
-    const erc20 = new Contract(l2Token.toAddress(), ERC20_ABI, this.l2Signer);
-    const approvalTxn: AugmentedTransaction = {
-      contract: erc20,
-      chainId: this.l2chainId,
-      method: "approve",
-      unpermissioned: false,
-      nonMulticall: true,
-      args: [this.l2Bridge.address, amount],
-      message: `✅ Approve Hyperlane ${symbol} for withdrawal`,
-      mrkdwn: `Approve ${formatter(amount.toString())} ${symbol} for withdrawal via Hyperlane router ${
-        this.l2Bridge.address
-      } on ${getNetworkName(this.l2chainId)}`,
-    };
 
     const fee: BigNumber = await this.l2Bridge.quoteGasPayment(this.destinationDomainId);
     const feeCap = HYPERLANE_FEE_CAP_OVERRIDES[this.l2chainId] ?? HYPERLANE_DEFAULT_FEE_CAP;
@@ -120,9 +106,6 @@ export class HyperlaneXERC20BridgeL2 extends BaseL2BridgeAdapter {
       method: "transferRemote",
       unpermissioned: false,
       nonMulticall: true,
-      // TODO: `canFailInSimulation` and  `gasLimit` are set for now because of current approval flow (see tx above). If we approve these contracts in advance, we'll be able to remove these constraints
-      canFailInSimulation: true,
-      gasLimit: BigNumber.from(600000),
       args: [this.destinationDomainId, toAddress.toBytes32(), amount],
       value: fee,
       message: `🎰 Withdrew Hyperlane xERC20 ${symbol} to L1`,
@@ -131,7 +114,7 @@ export class HyperlaneXERC20BridgeL2 extends BaseL2BridgeAdapter {
       )} to L1 via Hyperlane`,
     };
 
-    return [approvalTxn, withdrawTxn];
+    return [withdrawTxn];
   }
 
   async getL2PendingWithdrawalAmount(
@@ -146,7 +129,7 @@ export class HyperlaneXERC20BridgeL2 extends BaseL2BridgeAdapter {
     );
 
     let recipientBytes32: string;
-    const isSpokePool = await isContractDeployedToAddress(fromAddress.toAddress(), this.l2Bridge.provider);
+    const isSpokePool = await isContractDeployedToAddress(fromAddress.toNative(), this.l2Bridge.provider);
     if (isSpokePool) {
       recipientBytes32 = toBytes32(this.hubPoolAddress);
     } else {
@@ -185,5 +168,14 @@ export class HyperlaneXERC20BridgeL2 extends BaseL2BridgeAdapter {
     }
 
     return outstandingWithdrawalAmount;
+  }
+
+  public override requiredTokenApprovals(): { token: EvmAddress; bridge: EvmAddress }[] {
+    return [
+      {
+        token: this.l2Token,
+        bridge: EvmAddress.from(this.l2Bridge.address),
+      },
+    ];
   }
 }

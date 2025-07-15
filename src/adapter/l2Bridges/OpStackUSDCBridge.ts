@@ -9,6 +9,7 @@ import {
   EventSearchConfig,
   getNetworkName,
   isDefined,
+  MAX_SAFE_ALLOWANCE,
   paginatedEventQuery,
   Provider,
   Signer,
@@ -36,7 +37,7 @@ export class OpStackUSDCBridge extends BaseL2BridgeAdapter {
     this.l1Bridge = new Contract(l1Address, l1ABI, l1Provider);
   }
 
-  constructWithdrawToL1Txns(
+  async constructWithdrawToL1Txns(
     to: EvmAddress,
     l2Token: EvmAddress,
     _l1Token: EvmAddress,
@@ -45,35 +46,38 @@ export class OpStackUSDCBridge extends BaseL2BridgeAdapter {
     const { l2chainId: chainId, l2Bridge } = this;
 
     const txns: AugmentedTransaction[] = [];
-    const { decimals, symbol } = getTokenInfo(l2Token.toAddress(), this.l2chainId);
+    const { decimals, symbol } = getTokenInfo(l2Token, this.l2chainId);
     const formatter = createFormatFunction(2, 4, false, decimals);
 
-    const erc20 = new Contract(l2Token.toAddress(), ERC20_ABI, this.l2Signer);
+    const erc20 = new Contract(l2Token.toNative(), ERC20_ABI, this.l2Signer);
     const formattedAmount = formatter(amount.toString());
     const chain = getNetworkName(chainId);
     const nonMulticall = true;
     const unpermissioned = false;
 
-    txns.push({
-      chainId,
-      contract: erc20,
-      method: "approve",
-      args: [l2Bridge.address, amount],
-      nonMulticall,
-      unpermissioned,
-      message: `✅ Approved ${formattedAmount} Circle Bridged (upgradable) ${symbol} for withdrawal from ${chain}.`,
-    });
-
-    txns.push({
-      chainId,
-      contract: l2Bridge,
-      method: "sendMessage",
-      args: [to.toAddress(), amount.toString(), this.minGasLimit],
-      nonMulticall,
-      unpermissioned,
-      canFailInSimulation: true, // approval has not been confirmed at the time of simulation.
-      message: `🎰 Withdrew ${formattedAmount} Circle Bridged (upgradable) ${symbol} from ${chain} to L1`,
-    });
+    const allowance = await erc20.allowance(await this.l2Signer.getAddress(), l2Bridge.address);
+    if (allowance.lt(amount)) {
+      // Approval must be in place before withdrawal is enqueued. Catch the withdrawal on the next run.
+      txns.push({
+        chainId,
+        contract: erc20,
+        method: "approve",
+        args: [l2Bridge.address, MAX_SAFE_ALLOWANCE],
+        nonMulticall,
+        unpermissioned,
+        message: `✅ Approved Circle Bridged (upgradable) ${symbol} for withdrawal from ${chain}.`,
+      });
+    } else {
+      txns.push({
+        chainId,
+        contract: l2Bridge,
+        method: "sendMessage",
+        args: [to.toNative(), amount.toString(), this.minGasLimit],
+        nonMulticall,
+        unpermissioned,
+        message: `🎰 Withdrew ${formattedAmount} Circle Bridged (upgradable) ${symbol} from ${chain} to L1`,
+      });
+    }
 
     return Promise.resolve(txns);
   }
@@ -86,8 +90,8 @@ export class OpStackUSDCBridge extends BaseL2BridgeAdapter {
   ): Promise<BigNumber> {
     _l2Token; // unused
 
-    const sentFilter = this.l2Bridge.filters.MessageSent(from.toAddress());
-    const receiveFilter = this.l1Bridge.filters.MessageReceived(from.toAddress());
+    const sentFilter = this.l2Bridge.filters.MessageSent(from.toNative());
+    const receiveFilter = this.l1Bridge.filters.MessageReceived(from.toNative());
 
     const [l2Events, l1Events] = await Promise.all([
       paginatedEventQuery(this.l2Bridge, sentFilter, l2EventConfig),

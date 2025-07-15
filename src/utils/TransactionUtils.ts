@@ -18,7 +18,17 @@ import {
   stringifyThrownValue,
   CHAIN_IDs,
   EvmGasPriceEstimate,
+  SVMProvider,
 } from "../utils";
+import {
+  CompilableTransactionMessage,
+  compileTransaction,
+  KeyPairSigner,
+  signTransaction,
+  getBase64EncodedWireTransaction,
+  type Blockhash,
+} from "@solana/kit";
+
 dotenv.config();
 
 // Define chains that require legacy (type 0) transactions
@@ -29,6 +39,11 @@ export type TransactionSimulationResult = {
   succeed: boolean;
   reason?: string;
   data?: any;
+};
+
+export type LatestBlockhash = {
+  blockhash: Blockhash;
+  lastValidBlockHeight: bigint;
 };
 
 const { isError, isEthersError } = typeguards;
@@ -48,6 +63,18 @@ const txnRetryable = (error?: unknown): boolean => {
   }
 
   return expectedRpcErrorMessages.has((error as Error)?.message);
+};
+
+const isFillRelayError = (error: unknown): boolean => {
+  const fillRelaySelector = "0xdeff4b24"; // keccak256("fillRelay()")[:4]
+  const multicallSelector = "0xac9650d8"; // keccak256("multicall()")[:4]
+
+  const errorStack = (error as Error).stack;
+  const isFillRelayError = errorStack?.includes(fillRelaySelector);
+  const isMulticallError = errorStack?.includes(multicallSelector);
+  const isFillRelayInMulticallError = isMulticallError && errorStack?.includes(fillRelaySelector);
+
+  return isFillRelayError && isFillRelayInMulticallError;
 };
 
 export function getNetworkError(err: unknown): string {
@@ -158,7 +185,7 @@ export async function runTransaction(
           errorReasons: ethersErrors.map((e, i) => `\t ${i}: ${e.reason}`).join("\n"),
         });
       } else {
-        logger[txnRetryable(error) ? "warn" : "error"]({
+        logger[txnRetryable(error) || isFillRelayError(error) ? "warn" : "error"]({
           ...commonFields,
           error: stringifyThrownValue(error),
         });
@@ -166,6 +193,17 @@ export async function runTransaction(
       throw error;
     }
   }
+}
+
+export async function runTransactionSvm(
+  unsignedTransaction: CompilableTransactionMessage,
+  signer: KeyPairSigner,
+  provider: SVMProvider
+): Promise<string> {
+  const compiledTx = compileTransaction(unsignedTransaction);
+  const signedTx = await signTransaction([signer.keyPair], compiledTx);
+  const serializedTx = getBase64EncodedWireTransaction(signedTx);
+  return provider.sendTransaction(serializedTx, { encoding: "base64" }).send();
 }
 
 export async function getGasPrice(
@@ -205,7 +243,7 @@ export async function willSucceed(transaction: AugmentedTransaction): Promise<Tr
   const args = transaction.value ? [...transaction.args, { value: transaction.value }] : transaction.args;
 
   // First callStatic, which will surface a custom error if the transaction would fail.
-  // This is useful for surfacing custom error revert reasons like RelayFilled in the V3 SpokePool but
+  // This is useful for surfacing custom error revert reasons like RelayFilled in the SpokePool but
   // it does incur an extra RPC call. We do this because estimateGas is a provider function that doesn't
   // relay custom errors well: https://github.com/ethers-io/ethers.js/discussions/3291#discussion-4314795
   let data;

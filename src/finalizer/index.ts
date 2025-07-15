@@ -32,6 +32,9 @@ import {
   Profiler,
   stringifyThrownValue,
   isEVMSpokePoolClient,
+  chainIsEvm,
+  EvmAddress,
+  Address,
 } from "../utils";
 import { ChainFinalizer, CrossChainMessage, isAugmentedTransaction } from "./types";
 import {
@@ -103,6 +106,10 @@ const chainFinalizers: { [chainId: number]: { finalizeOnL2: ChainFinalizer[]; fi
     finalizeOnL1: [scrollFinalizer],
     finalizeOnL2: [],
   },
+  [CHAIN_IDs.SOLANA]: {
+    finalizeOnL1: [cctpL2toL1Finalizer],
+    finalizeOnL2: [cctpL1toL2Finalizer],
+  },
   [CHAIN_IDs.MODE]: {
     finalizeOnL1: [opStackFinalizer],
     finalizeOnL2: [],
@@ -132,8 +139,8 @@ const chainFinalizers: { [chainId: number]: { finalizeOnL2: ChainFinalizer[]; fi
     finalizeOnL2: [],
   },
   [CHAIN_IDs.WORLD_CHAIN]: {
-    finalizeOnL1: [opStackFinalizer],
-    finalizeOnL2: [],
+    finalizeOnL1: [opStackFinalizer, cctpL2toL1Finalizer],
+    finalizeOnL2: [cctpL1toL2Finalizer],
   },
   [CHAIN_IDs.INK]: {
     finalizeOnL1: [opStackFinalizer],
@@ -243,12 +250,12 @@ export async function finalize(
     const userSpecifiedAddresses: string[] = process.env.FINALIZER_WITHDRAWAL_TO_ADDRESSES
       ? JSON.parse(process.env.FINALIZER_WITHDRAWAL_TO_ADDRESSES).map((address) => ethers.utils.getAddress(address))
       : [];
-    const addressesToFinalize = [
+    const addressesToFinalize: Address[] = [
       hubPoolClient.hubPool.address,
-      spokePoolClients[chainId].spokePoolAddress.toEvmAddress(),
       CONTRACT_ADDRESSES[hubChainId]?.atomicDepositor?.address,
       ...userSpecifiedAddresses,
-    ].map(getAddress);
+    ].map((address) => EvmAddress.from(getAddress(address)));
+    addressesToFinalize.push(spokePoolClients[chainId].spokePoolAddress);
 
     // We can subloop through the finalizers for each chain, and then execute the finalizer. For now, the
     // main reason for this is related to CCTP finalizations. We want to run the CCTP finalizer AND the
@@ -297,11 +304,13 @@ export async function finalize(
         // since any L2 -> L1 transfers will be finalized on the hub chain.
         hubChainId,
         ...configuredChainIds,
-      ]).map(async (chainId) => {
-        const spokePoolClient = spokePoolClients[chainId];
-        assert(isEVMSpokePoolClient(spokePoolClient));
-        return [chainId, await getMultisender(chainId, spokePoolClient.spokePool.signer)] as [number, Contract];
-      })
+      ])
+        .filter(chainIsEvm)
+        .map(async (chainId) => {
+          const spokePoolClient = spokePoolClients[chainId];
+          assert(isEVMSpokePoolClient(spokePoolClient));
+          return [chainId, await getMultisender(chainId, spokePoolClient.spokePool.signer)] as [number, Contract];
+        })
     )
   );
   // Assert that no multicall2Lookup is undefined
